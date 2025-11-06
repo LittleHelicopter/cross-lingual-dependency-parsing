@@ -33,23 +33,94 @@ pip install transformers
 
 ## Example Training
 
-### Baseline English
+### Stage 1
 
-(unfrozen encoder)
+unfrozen encoder
+ls: english
+
 ```bash
 python src/train_parser.py \
   --train_file data/UD_English-EWT/en_ewt-ud-train.conllu \
   --dev_file data/UD_English-EWT/en_ewt-ud-dev.conllu \
   --test_file data/UD_English-EWT/en_ewt-ud-test.conllu \
   --model_name xlm-roberta-base \
-  --batch_size 8 \
+  --batch_size 32 \
   --epochs 20 \
   --lr 2e-5 \
   --output_dir models \
   --exp_name baseline_en_full
 ```
 
+### Stage 2
+
+quick run:
+```
+chmod +x src/train_stage2.sh
+src/train_stage2.sh
+```
+include:
+
+
+frozen encoder
+lt: chinese(different group)
+
+```bash
+python src/train_parser.py \
+  --train_file data/UD_Chinese-GSDSimp/zh_gsdsimp-ud-train.conllu \
+  --dev_file data/UD_Chinese-GSDSimp/zh_gsdsimp-ud-dev.conllu \
+  --test_file data/UD_Chinese-GSDSimp/zh_gsdsimp-ud-test.conllu \
+  --model_name xlm-roberta-base \
+  --load_encoder models/baseline_en_full/best_model.pt \
+  --freeze_encoder \
+  --batch_size 32 \
+  --epochs 20 \
+  --lr 5e-4 \
+  --output_dir models \
+  --exp_name transfer_en2zh
+```
+
+lt: german(same group)
+
+```bash
+python src/train_parser.py \
+  --train_file data/UD_German-GSD/de_gsd-ud-train.conllu \
+  --dev_file data/UD_German-GSD/de_gsd-ud-dev.conllu \
+  --test_file data/UD_German-GSD/de_gsd-ud-test.conllu \
+  --model_name xlm-roberta-base \
+  --load_encoder models/baseline_en_full/best_model.pt \
+  --freeze_encoder \
+  --batch_size 32 \
+  --epochs 20 \
+  --lr 5e-4 \
+  --output_dir models \
+  --exp_name transfer_en2de
+```
+
+
+
+### Upperbound
+
+quick run:
+```
+chmod +x src/train_upperbound.sh
+src/train_upperbound.sh
+```
+
+
+
+
+
+# xxx
+
+
+
+
 check num_label:
 grep -v '^#' data/UD_English-EWT/en_ewt-ud-train.conllu | awk '{print $8}' | sort | uniq | wc -l
 
+grep -v '^#' data/UD_German-GSD/de_gsd-ud-train.conllu | awk '{print $8}' | sort | uniq | wc -l
 
+
+## note：
+
+德语的依存关系不需要更新英语的label，而中文需要
