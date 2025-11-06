@@ -317,7 +317,9 @@ def main():
         print(f"Loaded {len(test_sentences)} test sentences")
     
     # Create label vocabulary
-    label_to_idx = create_label_vocab(train_sentences)
+    # label_to_idx = create_label_vocab(train_sentences)
+    # found that there's bug in zh, "orphan" did not occur in training dataset
+    label_to_idx = create_label_vocab(train_sentences + dev_sentences + test_sentences)
     print(f"Found {len(label_to_idx)} dependency labels")
     
     # Save label vocabulary
