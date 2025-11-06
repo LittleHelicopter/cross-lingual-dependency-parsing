@@ -1,7 +1,6 @@
 """
 Training script for biaffine dependency parser with XLM-R.
 """
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -11,12 +10,10 @@ from tqdm import tqdm
 import argparse
 import json
 import os
-
 from utils_conllu import (
     read_conllu, create_label_vocab, DependencyDataset,
     collate_fn, compute_uas_las
 )
-
 
 class Biaffine(nn.Module):
     """Biaffine attention layer."""
@@ -60,7 +57,6 @@ class Biaffine(nn.Module):
         output = output + self.bias.view(1, 1, 1, -1)
         
         return output
-
 
 class BiaffineDependencyParser(nn.Module):
     """Biaffine dependency parser with XLM-R encoder."""
@@ -140,7 +136,6 @@ class BiaffineDependencyParser(nn.Module):
         for param in self.encoder.parameters():
             param.requires_grad = True
 
-
 def train_epoch(model, dataloader, optimizer, device):
     """Train for one epoch."""
     model.train()
@@ -210,7 +205,6 @@ def train_epoch(model, dataloader, optimizer, device):
         'rel_loss': total_rel_loss / len(dataloader)
     }
 
-
 def evaluate(model, dataloader, device):
     """Evaluate model on dev/test set."""
     model.eval()
@@ -260,7 +254,6 @@ def evaluate(model, dataloader, device):
     
     return {'UAS': uas, 'LAS': las}
 
-
 def main():
     parser = argparse.ArgumentParser(description='Train biaffine dependency parser')
     
@@ -293,6 +286,9 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     exp_dir = os.path.join(args.output_dir, args.exp_name)
     os.makedirs(exp_dir, exist_ok=True)
+
+    # New: metrics log file path (per-epoch loss/UAS/LAS)
+    metrics_log_path = os.path.join(exp_dir, 'metrics.jsonl')
     
     # Device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -384,6 +380,21 @@ def main():
         # Evaluate
         dev_metrics = evaluate(model, dev_loader, device)
         print(f"Dev UAS: {dev_metrics['UAS']:.2f}%, LAS: {dev_metrics['LAS']:.2f}%")
+
+        # New: append per-epoch metrics to metrics.jsonl
+        is_best = dev_metrics['LAS'] > best_las
+        epoch_record = {
+            'epoch': epoch + 1,
+            'train_loss': train_metrics['loss'],
+            'train_arc_loss': train_metrics['arc_loss'],
+            'train_rel_loss': train_metrics['rel_loss'],
+            'dev_uas': dev_metrics['UAS'],
+            'dev_las': dev_metrics['LAS'],
+            'is_best': is_best
+        }
+        with open(metrics_log_path, 'a', encoding='utf-8') as f:
+            json.dump(epoch_record, f, ensure_ascii=False)
+            f.write('\n')
         
         # Save best model
         if dev_metrics['LAS'] > best_las:
@@ -401,6 +412,13 @@ def main():
             }
             
             torch.save(checkpoint, os.path.join(exp_dir, 'best_model.pt'))
+            # New: save a quick snapshot of the best dev metrics
+            with open(os.path.join(exp_dir, 'best_dev.json'), 'w', encoding='utf-8') as f:
+                json.dump({
+                    'epoch': epoch + 1,
+                    'dev_uas': best_uas,
+                    'dev_las': best_las
+                }, f, indent=2, ensure_ascii=False)
             print(f"Saved best model (LAS: {best_las:.2f}%)")
     
     # Final evaluation on test set
@@ -423,7 +441,6 @@ def main():
             json.dump(test_metrics, f, indent=2)
     
     print(f"\nBest Dev UAS: {best_uas:.2f}%, LAS: {best_las:.2f}%")
-
 
 if __name__ == '__main__':
     main()
