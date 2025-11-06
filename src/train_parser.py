@@ -1,3 +1,4 @@
+
 """
 Training script for biaffine dependency parser with XLM-R.
 """
@@ -42,20 +43,8 @@ class Biaffine(nn.Module):
         Returns:
             output: [batch_size, len1, len2, out_features]
         """
-        batch_size, len1, dim1 = input1.shape
-        len2, dim2 = input2.shape[1], input2.shape[2]
-        
-        # Method: For each output dimension o:
-        #   score[b,i,j,o] = input1[b,i,:] @ W[o,:,:] @ input2[b,j,:]
-        # Efficiently compute using einsum
-        
-        # Compute biaffine: input1 @ W @ input2^T
-        # output[b, i, j, o] = sum_{d1, d2} input1[b,i,d1] * W[o,d1,d2] * input2[b,j,d2]
         output = torch.einsum('bxi,oij,byj->bxyo', input1, self.weight, input2)
-        
-        # Add bias
         output = output + self.bias.view(1, 1, 1, -1)
-        
         return output
 
 class BiaffineDependencyParser(nn.Module):
@@ -98,7 +87,6 @@ class BiaffineDependencyParser(nn.Module):
             arc_scores: [batch_size, seq_len, seq_len] - head selection scores
             rel_scores: [batch_size, seq_len, seq_len, num_labels] - relation scores
         """
-        # Get encoder outputs
         outputs = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
         hidden = outputs.last_hidden_state  # [batch_size, seq_len, hidden_size]
         hidden = self.dropout(hidden)
@@ -118,12 +106,8 @@ class BiaffineDependencyParser(nn.Module):
         rel_dep = self.dropout(rel_dep)
         
         # Biaffine attention
-        # Arc scores: [batch, seq_len, seq_len, 1] -> [batch, seq_len, seq_len]
-        arc_scores = self.arc_biaffine(arc_dep, arc_head).squeeze(-1)
-        
-        # Relation scores: [batch, seq_len, seq_len, num_labels]
-        rel_scores = self.rel_biaffine(rel_dep, rel_head)
-        
+        arc_scores = self.arc_biaffine(arc_dep, arc_head).squeeze(-1)  # [B, L, L]
+        rel_scores = self.rel_biaffine(rel_dep, rel_head)              # [B, L, L, C]
         return arc_scores, rel_scores
     
     def freeze_encoder(self):
@@ -135,6 +119,42 @@ class BiaffineDependencyParser(nn.Module):
         """Unfreeze encoder weights."""
         for param in self.encoder.parameters():
             param.requires_grad = True
+    
+    def freeze_encoder_layers(self, freeze_until=8):
+        """
+        Freeze encoder layers up to a given index (exclusive).
+        Example: freeze_until=8 means freeze encoder.layer[:8], keep last layers trainable.
+        """
+        if not hasattr(self.encoder, 'encoder') or not hasattr(self.encoder.encoder, 'layer'):
+            print("Warning: encoder structure not standard (no encoder.layer[]), skipping partial freeze.")
+            return
+
+        for i, layer in enumerate(self.encoder.encoder.layer):
+            if i < freeze_until:
+                for param in layer.parameters():
+                    param.requires_grad = False
+            else:
+                for param in layer.parameters():
+                    param.requires_grad = True
+        print(f"Froze first {freeze_until} layers; kept last {len(self.encoder.encoder.layer) - freeze_until} layers trainable.")
+
+
+def mask_arc_scores(arc_scores, first_subword_mask):
+    """
+    Restrict head candidates to first-subword positions + root(0), and forbid self-loops.
+    arc_scores: [B, L, L]
+    first_subword_mask: [B, L]
+    """
+    # Allow head positions only at first-subwords and root(0)
+    head_cand = first_subword_mask.clone()
+    head_cand[:, 0] = 1  # allow root
+    arc_scores = arc_scores.masked_fill(~head_cand.bool().unsqueeze(1), float('-inf'))
+    # Forbid self-loops (except root 0,0 which we don't predict anyway)
+    B, L, _ = arc_scores.size()
+    eye = torch.eye(L, device=arc_scores.device, dtype=torch.bool).unsqueeze(0).expand(B, -1, -1)
+    eye[:, 0, 0] = False
+    arc_scores = arc_scores.masked_fill(eye, float('-inf'))
+    return arc_scores
 
 def train_epoch(model, dataloader, optimizer, device):
     """Train for one epoch."""
@@ -144,41 +164,41 @@ def train_epoch(model, dataloader, optimizer, device):
     total_rel_loss = 0
     
     progress_bar = tqdm(dataloader, desc="Training")
+    arc_loss_fn = nn.CrossEntropyLoss(reduction='none')
+    rel_loss_fn = nn.CrossEntropyLoss(reduction='none')
     
     for batch in progress_bar:
         input_ids = batch['input_ids'].to(device)
         attention_mask = batch['attention_mask'].to(device)
+        first_subword_mask = batch['first_subword_mask'].to(device)
         gold_heads = batch['heads'].to(device)
         gold_labels = batch['labels'].to(device)
         
         # Forward pass
         arc_scores, rel_scores = model(input_ids, attention_mask)
+        # Restrict head candidates and forbid self loops
+        arc_scores = mask_arc_scores(arc_scores, first_subword_mask)
         
-        # Mask: ignore padding tokens
-        mask = attention_mask.bool()
+        # Mask: supervise only first-subword tokens that are not padding
+        mask_dep = (attention_mask.bool() & first_subword_mask.bool())
         
         # Arc loss (head prediction)
-        arc_loss_fn = nn.CrossEntropyLoss(reduction='none')
         arc_loss = arc_loss_fn(
             arc_scores.reshape(-1, arc_scores.size(-1)),
             gold_heads.reshape(-1)
         )
-        arc_loss = (arc_loss * mask.reshape(-1).float()).sum() / mask.sum()
+        arc_loss = (arc_loss * mask_dep.reshape(-1).float()).sum() / mask_dep.sum().clamp_min(1)
         
-        # Relation loss (label prediction)
-        # Use gold heads during training for stability
+        # Relation loss (label prediction) using gold heads
         batch_size, seq_len = gold_heads.shape
         batch_indices = torch.arange(batch_size, device=device).unsqueeze(1).expand(-1, seq_len)
         token_indices = torch.arange(seq_len, device=device).unsqueeze(0).expand(batch_size, -1)
-        
         rel_scores_at_gold_heads = rel_scores[batch_indices, token_indices, gold_heads]
-        
-        rel_loss_fn = nn.CrossEntropyLoss(reduction='none')
         rel_loss = rel_loss_fn(
             rel_scores_at_gold_heads.reshape(-1, rel_scores_at_gold_heads.size(-1)),
             gold_labels.reshape(-1)
         )
-        rel_loss = (rel_loss * mask.reshape(-1).float()).sum() / mask.sum()
+        rel_loss = (rel_loss * mask_dep.reshape(-1).float()).sum() / mask_dep.sum().clamp_min(1)
         
         # Total loss
         loss = arc_loss + rel_loss
@@ -217,11 +237,14 @@ def evaluate(model, dataloader, device):
         for batch in tqdm(dataloader, desc="Evaluating"):
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
+            first_subword_mask = batch['first_subword_mask'].to(device)
             gold_heads = batch['heads'].to(device)
             gold_labels = batch['labels'].to(device)
             
             # Forward pass
             arc_scores, rel_scores = model(input_ids, attention_mask)
+            # Apply the same head candidate and self-loop constraints
+            arc_scores = mask_arc_scores(arc_scores, first_subword_mask)
             
             # Predict heads (argmax)
             pred_heads = arc_scores.argmax(dim=-1)
@@ -230,28 +253,23 @@ def evaluate(model, dataloader, device):
             batch_size, seq_len = pred_heads.shape
             batch_indices = torch.arange(batch_size, device=device).unsqueeze(1).expand(-1, seq_len)
             token_indices = torch.arange(seq_len, device=device).unsqueeze(0).expand(batch_size, -1)
-            
             rel_scores_at_pred_heads = rel_scores[batch_indices, token_indices, pred_heads]
             pred_labels = rel_scores_at_pred_heads.argmax(dim=-1)
             
-            # Compute metrics with mask
-            mask = attention_mask.bool()
+            # Compute metrics only on first-subword tokens
+            mask_dep = (attention_mask.bool() & first_subword_mask.bool())
             
-            # UAS: correct head attachments
-            head_correct = (pred_heads == gold_heads) & mask
+            head_correct = (pred_heads == gold_heads) & mask_dep
             total_correct_heads += head_correct.sum().item()
             
-            # LAS: correct head AND label
-            label_correct = (pred_labels == gold_labels) & mask
+            label_correct = (pred_labels == gold_labels) & mask_dep
             las_correct = head_correct & label_correct
             total_correct_labels += las_correct.sum().item()
             
-            total_tokens += mask.sum().item()
+            total_tokens += mask_dep.sum().item()
     
-    # Compute final scores
     uas = (total_correct_heads / total_tokens) * 100 if total_tokens > 0 else 0
     las = (total_correct_labels / total_tokens) * 100 if total_tokens > 0 else 0
-    
     return {'UAS': uas, 'LAS': las}
 
 def main():
@@ -271,8 +289,10 @@ def main():
     # Training arguments
     parser.add_argument('--batch_size', type=int, default=16, help='Batch size')
     parser.add_argument('--epochs', type=int, default=20, help='Number of epochs')
-    parser.add_argument('--lr', type=float, default=2e-5, help='Learning rate')
+    parser.add_argument('--lr', type=float, default=2e-5, help='Learning rate for encoder')
     parser.add_argument('--freeze_encoder', action='store_true', help='Freeze encoder weights')
+    parser.add_argument('--freeze_until', type=int, default=None,
+                    help='Freeze encoder layers up to this index (exclusive), e.g. 8 means freeze first 8 layers.')
     parser.add_argument('--load_encoder', type=str, default=None,
                         help='Path to pretrained encoder checkpoint')
     
@@ -281,13 +301,23 @@ def main():
     parser.add_argument('--exp_name', type=str, default='exp', help='Experiment name')
     
     args = parser.parse_args()
+
+
+    # Set randomseed
+
+    import random, numpy as np, torch
+    seed = getattr(args, 'seed', 42)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
     
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
     exp_dir = os.path.join(args.output_dir, args.exp_name)
     os.makedirs(exp_dir, exist_ok=True)
-
-    # New: metrics log file path (per-epoch loss/UAS/LAS)
     metrics_log_path = os.path.join(exp_dir, 'metrics.jsonl')
     
     # Device
@@ -307,16 +337,16 @@ def main():
     dev_sentences = read_conllu(args.dev_file)
     print(f"Loaded {len(dev_sentences)} dev sentences")
     
+    test_sentences = []
     if args.test_file:
         print(f"Loading test data from {args.test_file}")
         test_sentences = read_conllu(args.test_file)
         print(f"Loaded {len(test_sentences)} test sentences")
     
     # Create label vocabulary
-    # label_to_idx = create_label_vocab(train_sentences)
     # found that there's bug in zh, "orphan" did not occur in training dataset
     label_to_idx = create_label_vocab(train_sentences + dev_sentences + test_sentences)
-    print(f"Found {len(label_to_idx)} dependency labels")
+    print(f"Found {len(label_to_idx)} dependency labels (including [PAD])")
     
     # Save label vocabulary
     with open(os.path.join(exp_dir, 'label_vocab.json'), 'w') as f:
@@ -354,15 +384,29 @@ def main():
     )
     
     if args.freeze_encoder:
-        print("Freezing encoder weights")
+        print("Freezing entire encoder")
         model.freeze_encoder()
+    elif args.freeze_until is not None:
+        model.freeze_encoder_layers(args.freeze_until)
+
     
     model.to(device)
     
-    # Optimizer
+    # Optimizer: two param groups (top layers with higher LR; encoder with args.lr)
+    top_params = []
+    enc_params = []
+    for n, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        if n.startswith('encoder'):
+            enc_params.append(p)
+        else:
+            top_params.append(p)
     optimizer = optim.AdamW(
-        [p for p in model.parameters() if p.requires_grad],
-        lr=args.lr
+        [
+            {'params': top_params, 'lr': 1e-3, 'weight_decay': 0.0},
+            {'params': enc_params, 'lr': args.lr, 'weight_decay': 0.01}
+        ] if enc_params else [{'params': top_params, 'lr': 1e-3, 'weight_decay': 0.0}]
     )
     
     # Training loop
@@ -380,8 +424,8 @@ def main():
         # Evaluate
         dev_metrics = evaluate(model, dev_loader, device)
         print(f"Dev UAS: {dev_metrics['UAS']:.2f}%, LAS: {dev_metrics['LAS']:.2f}%")
-
-        # New: append per-epoch metrics to metrics.jsonl
+        
+        # Append metrics to metrics.jsonl
         is_best = dev_metrics['LAS'] > best_las
         epoch_record = {
             'epoch': epoch + 1,
@@ -412,7 +456,6 @@ def main():
             }
             
             torch.save(checkpoint, os.path.join(exp_dir, 'best_model.pt'))
-            # New: save a quick snapshot of the best dev metrics
             with open(os.path.join(exp_dir, 'best_dev.json'), 'w', encoding='utf-8') as f:
                 json.dump({
                     'epoch': epoch + 1,
@@ -424,8 +467,9 @@ def main():
     # Final evaluation on test set
     if args.test_file:
         print("\n=== Final Test Evaluation ===")
-        checkpoint = torch.load(os.path.join(exp_dir, 'best_model.pt'))
+        checkpoint = torch.load(os.path.join(exp_dir, 'best_model.pt'), map_location=device)
         model.load_state_dict(checkpoint['model_state_dict'])
+        model.to(device)
         
         test_dataset = DependencyDataset(test_sentences, tokenizer, label_to_idx)
         test_loader = DataLoader(
