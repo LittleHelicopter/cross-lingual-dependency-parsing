@@ -110,6 +110,24 @@ src/train_upperbound.sh
 
 
 
+
+### Headonly 
+quick run:
+```
+chmod +x src/train_headonly.sh
+src/train_headonly.sh
+```
+
+
+### Layer Freeze
+
+quick run:
+```
+chmod +x src/train_layer.sh
+src/train_layer.sh
+```
+
+
 # xxx
 
 
@@ -124,3 +142,16 @@ grep -v '^#' data/UD_German-GSD/de_gsd-ud-train.conllu | awk '{print $8}' | sort
 ## note：
 
 德语的依存关系不需要更新英语的label，而中文需要
+
+
+python src/train_parser.py \
+  --train_file data/UD_German-GSD/de_gsd-ud-train.conllu \
+  --dev_file data/UD_German-GSD/de_gsd-ud-dev.conllu \
+  --test_file data/UD_German-GSD/de_gsd-ud-test.conllu \
+  --model_name xlm-roberta-base \
+  --freeze_encoder \
+  --batch_size 32 \
+  --epochs 20 \
+  --lr 5e-4 \
+  --output_dir models \
+  --exp_name frozen_encoder_de
