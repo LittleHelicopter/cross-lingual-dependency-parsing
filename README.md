@@ -29,6 +29,9 @@ pip install conllu
 
 pip install transformers
 
+pip install matplotlib
+
+pip install pandas
 
 
 ## Example Training
@@ -37,21 +40,12 @@ pip install transformers
 
 quick run:
 ```
-chmod +x src/train_upperbound.sh
-src/train_upperbound.sh
+chmod +x src/train_full.sh
+src/train_full.sh
 ```
 
 
 
-
-
-
-### Headonly 
-quick run:
-```
-chmod +x src/train_headonly.sh
-src/train_headonly.sh
-```
 
 
 ### Layer Freeze
@@ -61,6 +55,15 @@ quick run:
 chmod +x src/train_layer.sh
 src/train_layer.sh
 ```
+
+
+### Headonly 
+quick run:
+```
+chmod +x src/train_headonly.sh
+src/train_headonly.sh
+```
+
 
 
 ### Stage 1
