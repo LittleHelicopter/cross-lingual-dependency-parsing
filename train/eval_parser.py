@@ -8,97 +8,85 @@ import json
 import os
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer, AutoModel
+from train_parser import BiaffineDependencyParser, mask_arc_scores
 
 from utils_conllu import (
     read_conllu, DependencyDataset, collate_fn, compute_uas_las
 )
-from train_parser import BiaffineDependencyParser
 
 
 def evaluate_detailed(model, dataloader, device, idx_to_label=None):
-    """
-    Evaluate model with detailed metrics.
-    
-    Args:
-        model: Trained parser model
-        dataloader: DataLoader for evaluation
-        device: torch device
-        idx_to_label: Optional mapping from label indices to names
-        
-    Returns:
-        Dictionary with UAS, LAS, and per-label accuracy
-    """
     model.eval()
-    
+
     total_correct_heads = 0
     total_correct_labels = 0
     total_tokens = 0
-    
-    # For per-label statistics
+
     label_correct = {}
     label_total = {}
-    
+
     with torch.no_grad():
         for batch in dataloader:
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
+            first_subword_mask = batch['first_subword_mask'].to(device)
             gold_heads = batch['heads'].to(device)
             gold_labels = batch['labels'].to(device)
-            
-            # Forward pass
+
+            # Forward
             arc_scores, rel_scores = model(input_ids, attention_mask)
-            
-            # Predict heads
+
+            # 🔴 和训练完全一致
+            arc_scores = mask_arc_scores(arc_scores, first_subword_mask)
+
             pred_heads = arc_scores.argmax(dim=-1)
-            
-            # Predict labels at predicted heads
+
             batch_size, seq_len = pred_heads.shape
             batch_indices = torch.arange(batch_size, device=device).unsqueeze(1).expand(-1, seq_len)
             token_indices = torch.arange(seq_len, device=device).unsqueeze(0).expand(batch_size, -1)
-            
+
             rel_scores_at_pred_heads = rel_scores[batch_indices, token_indices, pred_heads]
             pred_labels = rel_scores_at_pred_heads.argmax(dim=-1)
-            
-            # Compute metrics with mask
-            mask = attention_mask.bool()
-            
-            # UAS: correct head attachments
-            head_correct_mask = (pred_heads == gold_heads) & mask
-            total_correct_heads += head_correct_mask.sum().item()
-            
-            # LAS: correct head AND label
-            label_correct_mask = (pred_labels == gold_labels) & mask
-            las_correct_mask = head_correct_mask & label_correct_mask
-            total_correct_labels += las_correct_mask.sum().item()
-            
-            total_tokens += mask.sum().item()
-            
-            # Per-label statistics
+
+            # 🔴 关键统一 mask
+            mask_dep = (attention_mask.bool() & first_subword_mask.bool())
+
+            head_correct = (pred_heads == gold_heads) & mask_dep
+            label_correct_mask = (pred_labels == gold_labels) & mask_dep
+            las_correct = head_correct & label_correct_mask
+
+            total_correct_heads += head_correct.sum().item()
+            total_correct_labels += las_correct.sum().item()
+            total_tokens += mask_dep.sum().item()
+
+            # per-label LAS
             if idx_to_label:
-                for label_idx in idx_to_label.keys():
-                    label_mask = (gold_labels == label_idx) & mask
-                    if label_mask.any():
-                        label_correct_count = (head_correct_mask & label_mask).sum().item()
-                        label_total_count = label_mask.sum().item()
-                        
-                        if label_idx not in label_correct:
-                            label_correct[label_idx] = 0
-                            label_total[label_idx] = 0
-                        
-                        label_correct[label_idx] += label_correct_count
-                        label_total[label_idx] += label_total_count
-    
-    # Compute overall scores
+                gold_labels_flat = gold_labels[mask_dep]
+                las_correct_flat = las_correct[mask_dep]
+
+                for label_idx in gold_labels_flat.unique():
+                    label_idx = label_idx.item()
+                    label_mask = (gold_labels_flat == label_idx)
+
+                    correct_count = las_correct_flat[label_mask].sum().item()
+                    total_count = label_mask.sum().item()
+
+                    if label_idx not in label_correct:
+                        label_correct[label_idx] = 0
+                        label_total[label_idx] = 0
+
+                    label_correct[label_idx] += correct_count
+                    label_total[label_idx] += total_count
+
     uas = (total_correct_heads / total_tokens) * 100 if total_tokens > 0 else 0
     las = (total_correct_labels / total_tokens) * 100 if total_tokens > 0 else 0
-    
+
     results = {
         'UAS': uas,
         'LAS': las,
         'num_tokens': total_tokens
     }
-    
-    # Per-label accuracy
+
     if idx_to_label:
         per_label_stats = {}
         for label_idx, label_name in idx_to_label.items():
@@ -108,11 +96,9 @@ def evaluate_detailed(model, dataloader, device, idx_to_label=None):
                     'accuracy': accuracy,
                     'count': label_total[label_idx]
                 }
-        
         results['per_label'] = per_label_stats
-    
-    return results
 
+    return results
 
 def main():
     parser = argparse.ArgumentParser(description='Evaluate dependency parser')

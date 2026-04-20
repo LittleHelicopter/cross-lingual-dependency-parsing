@@ -151,7 +151,7 @@ def mask_arc_scores(arc_scores, first_subword_mask):
     arc_scores = arc_scores.masked_fill(~head_cand.bool().unsqueeze(1), float('-inf'))
     # Forbid self-loops (except root 0,0 which we don't predict anyway)
     B, L, _ = arc_scores.size()
-    eye = torch.eye(L, device=arc_scores.device, dtype=torch.bool).unsqueeze(0).expand(B, -1, -1)
+    eye = torch.eye(L, device=arc_scores.device, dtype=torch.bool).unsqueeze(0).expand(B, -1, -1).clone()
     eye[:, 0, 0] = False
     arc_scores = arc_scores.masked_fill(eye, float('-inf'))
     return arc_scores
