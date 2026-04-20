@@ -1,1 +1,9 @@
-/data
+/data/ud*
+/data/UD_*
+/data/Universal*
+
+/src/__pycache__
+/models
+/models_*
+/analysis/outputs
+/experiments
